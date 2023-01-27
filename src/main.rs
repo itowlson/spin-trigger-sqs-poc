@@ -89,32 +89,53 @@ impl SqsTrigger {
     async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, queue_url: String, component: String) -> Result<()> {
         loop {
             println!("Attempting to receive from {queue_url}...");
-            let rmo = client.receive_message().queue_url(&queue_url).send().await?;
+            // Okay seems like we have to explicitly ask for the attr and message_attr names we want
+            let rmo = client
+                .receive_message()
+                .queue_url(&queue_url)
+                .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
+                .send()
+                .await?;
             if let Some(msgs) = rmo.messages() {
                 println!("...received from {queue_url}");
                 for m in msgs {
+                    let empty = HashMap::new();
+                    let attrs = m.attributes()
+                        .unwrap_or(&empty)
+                        .iter()
+                        .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
+                        .collect::<Vec<_>>();
                     let message = sqs::Message {
                         id: m.message_id(),
-                        message_attributes: &[],
+                        message_attributes: &attrs,
                         body: m.body(),
                     };
-                    Self::execute(&engine, &component, message).await?;
+                    let action = Self::execute(&engine, &component, message).await?;
+                    println!("...action is to {action:?}");
+                    if action == sqs::MessageAction::Delete {
+                        if let Some(receipt_handle) = m.receipt_handle() {
+                            match client.delete_message().queue_url(&queue_url).receipt_handle(receipt_handle).send().await {
+                                Ok(_) => (),
+                                Err(e) => eprintln!("TRIG: err deleting {receipt_handle}: {e:?}"),
+                            }
+                        }
+                    }
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
     }
 
-    async fn execute(engine: &Arc<TriggerAppEngine<Self>>, component_id: &str, message: sqs::Message<'_>) -> Result<()> {
+    async fn execute(engine: &Arc<TriggerAppEngine<Self>>, component_id: &str, message: sqs::Message<'_>) -> Result<sqs::MessageAction> {
         println!("Executing component {component_id}");
         let (instance, mut store) = engine.prepare_instance(component_id).await?;
         let sqs_engine = Sqs::new(&mut store, &instance, |data| data.as_mut())?;
         match sqs_engine.handle_queue_message(&mut store, message).await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(action)) => Ok(action),
             // TODO: BUTTLOAD OF LOGGING
             // TODO: DETECT FATALNESS
-            Ok(Err(_e)) => Ok(()),
-            Err(_e) => Ok(()),
+            Ok(Err(_e)) => Ok(sqs::MessageAction::Leave),
+            Err(_e) => Ok(sqs::MessageAction::Leave),
         }
     }
 }

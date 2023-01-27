@@ -21,6 +21,11 @@ enum error {
     error,
 }
 
+enum message-action {
+    delete,
+    leave,
+}
+
 // TODO: or allow for multiple messages?
 // TODO: allow a return to control delete/leave/extend visibility
-handle-queue-message: func(message: message) -> expected<unit, error>
+handle-queue-message: func(message: message) -> expected<message-action, error>
