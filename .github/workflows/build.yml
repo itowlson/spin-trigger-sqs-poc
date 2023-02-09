@@ -44,6 +44,8 @@ jobs:
       - name: Install pluginify
         shell: bash
         run: spin plugins install --url https://github.com/itowlson/spin-pluginify/releases/download/canary/pluginify.json --yes
+      - name: I WANT TO SEE IT WORK
+        run: spin pluginify --help
       - name: Set up for cross-compiled linux aarch64 build
         if: matrix.config.target == 'aarch64-unknown-linux-gnu'
         run: |
