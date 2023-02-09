@@ -37,15 +37,24 @@ jobs:
         with:
           toolchain: 1.66
           targets: ${{ matrix.config.target }}
+      # - name: Install Spin
+      #   uses: rajatjindal/setup-spin@main
+      #   with:
+      #     version: "v0.8.0"
       - name: Install Spin
-        uses: rajatjindal/setup-spin@main
-        with:
-          version: "v0.8.0"
+        if: ${{ matrix.config.target != 'x86_64-pc-windows-msvc' }}
+        shell: bash
+        run: curl -fsSL https://developer.fermyon.com/downloads/install.sh | bash -s
+      - name: Install Spin
+        if: ${{ matrix.config.target == 'x86_64-pc-windows-msvc' }}
+        run: |
+          curl -OL https://github.com/fermyon/spin/releases/download/v0.8.0/spin-v0.8.0-windows-amd64.zip
+          7z x -y spin-v0.8.0-windows-amd64.zip spin.exe
       - name: Install pluginify
         shell: bash
-        run: spin plugins install --url https://github.com/itowlson/spin-pluginify/releases/download/canary/pluginify.json --yes
+        run: ./spin plugins install --url https://github.com/itowlson/spin-pluginify/releases/download/canary/pluginify.json --yes
       - name: I WANT TO SEE IT WORK
-        run: spin pluginify --help
+        run: ./spin pluginify --help
       - name: Set up for cross-compiled linux aarch64 build
         if: matrix.config.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -60,7 +69,7 @@ jobs:
         run: cp target/${{ matrix.config.target }}/release/${{ env.PROGRAM_NAME}}${{ matrix.config.extension }} target/release/${{ env.PROGRAM_NAME}}${{ matrix.config.extension }}
 
       - name: Pluginify plugin binary
-        run: spin pluginify --arch ${{ matrix.config.arch }} --verbose
+        run: ./spin pluginify --arch ${{ matrix.config.arch }} --verbose
       - name: Show files after pluginification
         run: ls
       - name: Show files after pluginification
@@ -79,13 +88,22 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      # - name: Install Spin
+      #   uses: rajatjindal/setup-spin@main
+      #   with:
+      #     version: "v0.8.0"
       - name: Install Spin
-        uses: rajatjindal/setup-spin@main
-        with:
-          version: "v0.8.0"
+        if: ${{ matrix.config.target != 'x86_64-pc-windows-msvc' }}
+        shell: bash
+        run: curl -fsSL https://developer.fermyon.com/downloads/install.sh | bash -s
+      - name: Install Spin
+        if: ${{ matrix.config.target == 'x86_64-pc-windows-msvc' }}
+        run: |
+          curl -OL https://github.com/fermyon/spin/releases/download/v0.8.0/spin-v0.8.0-windows-amd64.zip
+          7z x -y spin-v0.8.0-windows-amd64.zip spin.exe
       - name: Install pluginify
         shell: bash
-        run: spin plugins install --url https://github.com/itowlson/spin-pluginify/releases/download/canary/pluginify.json --yes
+        run: ./spin plugins install --url https://github.com/itowlson/spin-pluginify/releases/download/canary/pluginify.json --yes
 
       - name: set the release version (tag)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -106,7 +124,7 @@ jobs:
         run: ls -R
       - name: pluginify it
         run: |
-          spin pluginify --merge --release-url-base https://github.com/itowlson/spin-trigger-sqs-poc/releases/download/${{ env.RELEASE_VERSION }}/ >${{ env.PROGRAM_NAME }}.json
+          ./spin pluginify --merge --release-url-base https://github.com/itowlson/spin-trigger-sqs-poc/releases/download/${{ env.RELEASE_VERSION }}/ >${{ env.PROGRAM_NAME }}.json
       - name: Display merged manifest
         run: cat ${{ env.PROGRAM_NAME }}.json
 
