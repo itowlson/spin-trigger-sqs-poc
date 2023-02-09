@@ -58,9 +58,11 @@ jobs:
         run: cp target/${{ matrix.config.target }}/release/${{ env.PROGRAM_NAME}}${{ matrix.config.extension }} target/release/${{ env.PROGRAM_NAME}}${{ matrix.config.extension }}
 
       - name: Pluginify plugin binary
-        run: spin pluginify --arch ${{ matrix.config.arch }}
+        run: spin pluginify --arch ${{ matrix.config.arch }} --verbose
       - name: Show files after pluginification
-        run: ls -R
+        run: ls
+      - name: Show files after pluginification
+        run: ls target/release
       - name: Archive pluginified
         uses: actions/upload-artifact@v3
         with:
