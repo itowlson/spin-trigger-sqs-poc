@@ -38,7 +38,7 @@ jobs:
           toolchain: 1.66
           targets: ${{ matrix.config.target }}
       - name: Install Spin
-        uses: rajatjindal/setup-spin@main
+        uses: rajatjindal/setup-actions/spin@main
         with:
           version: "v0.8.0"
       - name: Install pluginify
@@ -74,7 +74,7 @@ jobs:
     needs: build
     steps:
       - name: Install Spin
-        uses: rajatjindal/setup-spin@main
+        uses: rajatjindal/setup-actions/spin@main
         with:
           version: "v0.8.0"
       - name: Install pluginify
