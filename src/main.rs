@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use sqs::Sqs;
 use spin_trigger::{cli::{NoArgs, TriggerExecutorCommand}, TriggerAppEngine, TriggerExecutor};
 
+mod bus;
+mod message;
+
 wit_bindgen_wasmtime::import!({paths: ["sqs.wit"], async: *});
 
 pub(crate) type RuntimeData = sqs::SqsData;
@@ -63,14 +66,31 @@ impl TriggerExecutor for SqsTrigger {
             std::process::exit(0);
         });
 
+        let (bus_tx, bus_rx) = bus::in_memory_bus();
+        let bus_tx = Arc::new(bus_tx);
+
         let config = aws_config::load_from_env().await;
 
         let client = aws_sdk_sqs::Client::new(&config);
         let engine = Arc::new(self.engine);
 
-        let loops = self.queue_components.iter().map(|(queue_url, component)| {
-            Self::start_receive_loop(engine.clone(), &client, queue_url, component)
+        let listen_loops = self.queue_components.iter().map(|(queue_url, component)| {
+            Self::start_receive_loop2(bus_tx.clone(), &client, queue_url, component)
         });
+
+        // We can only have one handler though - how would we scale this
+        // up for a real environment?  (We could send everything via an
+        // internal queue but what's the performance on that...)
+        let handler_loop = tokio::spawn(async move {
+            Self::run_handler_loop(bus_rx, engine.clone()).await
+        });
+
+        // let loops = self.queue_components.iter().map(|(queue_url, component)| {
+        //     Self::start_receive_loop(engine.clone(), &client, queue_url, component)
+        // });
+
+        let mut loops = vec![handler_loop];
+        loops.extend(listen_loops);
 
         let (r, _, rest) = futures::future::select_all(loops).await;
         drop(rest);
@@ -79,7 +99,8 @@ impl TriggerExecutor for SqsTrigger {
     }
 }
 
-impl SqsTrigger {
+impl SqsTrigger { /*
+
     // TODO: would this work better returning a stream to allow easy multiplexing etc?
     fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, queue_url: &str, component: &str) -> tokio::task::JoinHandle<Result<()>> {
         let future = Self::receive(engine, client.clone(), queue_url.to_owned(), component.to_owned());
@@ -125,6 +146,42 @@ impl SqsTrigger {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
     }
+*/
+    fn start_receive_loop2<S: bus::Sender<message::IncomingSqsMessage> + Send + Sync + 'static>(bus_tx: Arc<S>, client: &aws_sdk_sqs::Client, queue_url: &str, component: &str) -> tokio::task::JoinHandle<Result<()>> {
+        let future = Self::receive2(bus_tx, client.clone(), queue_url.to_owned(), component.to_owned());
+        tokio::task::spawn(future)
+    }
+
+    async fn receive2<S: bus::Sender<message::IncomingSqsMessage> + Send + Sync + 'static>(bus_tx: Arc<S>, client: aws_sdk_sqs::Client, queue_url: String, component: String) -> Result<()> {
+        loop {
+            println!("Attempting to receive from {queue_url}...");
+            // Okay seems like we have to explicitly ask for the attr and message_attr names we want
+            let rmo = client
+                .receive_message()
+                .queue_url(&queue_url)
+                .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
+                .send()
+                .await?;
+            if let Some(msgs) = rmo.messages() {
+                println!("...received from {queue_url}");
+                for m in msgs {
+                    // let empty = HashMap::new();
+                    // let attrs = m.attributes()
+                    //     .unwrap_or(&empty)
+                    //     .iter()
+                    //     .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
+                    //     .collect::<Vec<_>>();
+                    let message = message::IncomingSqsMessage {
+                        component_id: component.clone(),
+                        queue_url: queue_url.to_owned(),
+                        body: m.body().map(|s| s.to_owned()),
+                    };
+                    bus_tx.send(message).await?;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    }
 
     async fn execute(engine: &Arc<TriggerAppEngine<Self>>, component_id: &str, message: sqs::Message<'_>) -> Result<sqs::MessageAction> {
         println!("Executing component {component_id}");
@@ -136,6 +193,20 @@ impl SqsTrigger {
             // TODO: DETECT FATALNESS
             Ok(Err(_e)) => Ok(sqs::MessageAction::Leave),
             Err(_e) => Ok(sqs::MessageAction::Leave),
+        }
+    }
+
+    async fn run_handler_loop<S: bus::Receiver<message::IncomingSqsMessage> + Send + Sync + 'static>(mut bus_rx: S, engine: Arc<TriggerAppEngine<Self>>) -> anyhow::Result<()> {
+        loop {
+            let m = bus_rx.receive().await?;
+            let sqsm = sqs::Message {
+                id: None,
+                message_attributes: &vec![],
+                body: m.body.as_ref().map(|s| &**s),
+            };
+            Self::execute(&engine, &m.component_id, sqsm).await?;
+            // TODO: this needs ANOTHER bus where we can queue delete actions.
+            // And something to listen to that bus too, and process them.
         }
     }
 }
