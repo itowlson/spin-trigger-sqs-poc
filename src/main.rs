@@ -160,6 +160,7 @@ impl SqsTrigger { /*
                 .receive_message()
                 .queue_url(&queue_url)
                 .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
+                .max_number_of_messages(10)
                 .send()
                 .await?;
             if let Some(msgs) = rmo.messages() {
@@ -178,8 +179,9 @@ impl SqsTrigger { /*
                     };
                     bus_tx.send(message).await?;
                 }
+            } else {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
     }
 
