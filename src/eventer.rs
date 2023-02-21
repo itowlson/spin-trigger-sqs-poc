@@ -63,7 +63,7 @@ impl TriggerExecutor for SqsEventer {
         });
         
         println!("EVENTER: running");
-        
+
         let config = aws_config::load_from_env().await;
 
         let client = aws_sdk_sqs::Client::new(&config);
@@ -112,7 +112,15 @@ impl SqsEventer {
                     let mut client = pb::sqs_message_executor_client::SqsMessageExecutorClient::connect("http://[::1]:50051").await?;
 
                     let request = tonic::Request::new(grpc_message);
-                    _ = client.execute(request);  // We don't want to wait on a response - just send and forget
+
+                    // So it turns out we can't fire and forget in this model - the client gets dropped
+                    // and it seems like that aborts the send or causes the receiver to abandon or something.
+                    // Awaiting the response seems tedious but I guess it is async rather than blocking
+                    // so maybe it's benign?  Or maybe if we use a shared long-lived client somehow
+                    // then it will all Just Work.  WHO KNOWS.
+                    // _ = client.execute(request);  // We don't want to wait on a response - just send and forget
+                    let r = client.execute(request).await;  // for diagnostics
+                    println!("EVENTER: sent event, response was {:?}", r);
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;

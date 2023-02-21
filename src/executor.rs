@@ -70,10 +70,13 @@ impl TriggerExecutor for SqsExecutor {
         println!("EXECUTOR: running");
 
         let addr = "[::1]:50051".parse().unwrap();
+        println!("EXECUTOR: preparing to serve");
         tonic::transport::Server::builder()
             .add_service(pb::sqs_message_executor_server::SqsMessageExecutorServer::new(self))
             .serve(addr)
             .await?;
+
+        println!("EXECUTOR: ended serve");
 
         Ok(())
     }
