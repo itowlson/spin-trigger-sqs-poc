@@ -1,0 +1,32 @@
+syntax = "proto3";
+package sqs;
+
+message SqsMessage {
+  string queue_url = 1;
+  string component = 2;
+  string id = 3;
+  string body = 4;
+
+  message SqsMessageAttribute {
+    string name = 1;
+    string data_type = 2;
+    string value = 3;  // TODO: how to do variants
+  }
+
+  repeated SqsMessageAttribute attributes = 5;
+
+  string receipt_handle = 6;
+}
+
+message SqsMessageResponse {
+//    enum Action {
+//        DELETE = 0;
+//        LEAVE = 1;
+//    }
+//
+//    Action action = 1;
+}
+
+service SqsMessageExecutor {
+    rpc execute(SqsMessage) returns (SqsMessageResponse) {}
+}
