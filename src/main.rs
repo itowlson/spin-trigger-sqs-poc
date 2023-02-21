@@ -21,7 +21,7 @@ async fn main() -> Result<(), Error> {
 
 pub struct SqsTrigger {
     engine: TriggerAppEngine<Self>,
-    queue_components: HashMap<String, String>,  // Queue URL -> component ID
+    queue_components: Vec<Component>, // HashMap<String, String>,  // Queue URL -> component ID
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -29,7 +29,18 @@ pub struct SqsTrigger {
 pub struct SqsTriggerConfig {
     pub component: String,
     pub queue_url: String,
-    // TODO: max num messages?  visibility timeout?  wait time?
+    pub max_messages: Option<u32>,
+    pub idle_wait_seconds: Option<u64>,
+    // TODO: visibility timeout?
+}
+
+#[derive(Clone, Debug)]
+struct Component {
+    pub id: String,
+    pub queue_url: String,
+    pub max_messages: i32,  // Should be usize but AWS
+    pub idle_wait: tokio::time::Duration,
+    // TODO: visibility timeout?
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -48,7 +59,12 @@ impl TriggerExecutor for SqsTrigger {
     fn new(engine: TriggerAppEngine<Self>) -> Result<Self> {
         let queue_components = engine
             .trigger_configs()
-            .map(|(_, config)| (config.queue_url.clone(), config.component.clone()))
+            .map(|(_, config)| Component {
+                id: config.component.clone(),
+                queue_url: config.queue_url.clone(),
+                max_messages: config.max_messages.unwrap_or(10).try_into().unwrap(),   // TODO: HA HA HA... YES!!!
+                idle_wait: tokio::time::Duration::from_secs(config.idle_wait_seconds.unwrap_or(2)),
+            })
             .collect();
 
         Ok(Self {
@@ -68,8 +84,8 @@ impl TriggerExecutor for SqsTrigger {
         let client = aws_sdk_sqs::Client::new(&config);
         let engine = Arc::new(self.engine);
 
-        let loops = self.queue_components.iter().map(|(queue_url, component)| {
-            Self::start_receive_loop(engine.clone(), &client, queue_url, component)
+        let loops = self.queue_components.iter().map(|component| {
+            Self::start_receive_loop(engine.clone(), &client, component)
         });
 
         let (r, _, rest) = futures::future::select_all(loops).await;
@@ -81,23 +97,24 @@ impl TriggerExecutor for SqsTrigger {
 
 impl SqsTrigger {
     // TODO: would this work better returning a stream to allow easy multiplexing etc?
-    fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, queue_url: &str, component: &str) -> tokio::task::JoinHandle<Result<()>> {
-        let future = Self::receive(engine, client.clone(), queue_url.to_owned(), component.to_owned());
+    fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, component: &Component) -> tokio::task::JoinHandle<Result<()>> {
+        let future = Self::receive(engine, client.clone(), component.clone());
         tokio::task::spawn(future)
     }
 
-    async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, queue_url: String, component: String) -> Result<()> {
+    async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) -> Result<()> {
         loop {
-            println!("Attempting to receive from {queue_url}...");
+            println!("Attempting to receive up to {} from {}...", component.max_messages, component.queue_url);
             // Okay seems like we have to explicitly ask for the attr and message_attr names we want
             let rmo = client
                 .receive_message()
-                .queue_url(&queue_url)
+                .max_number_of_messages(component.max_messages)
+                .queue_url(&component.queue_url)
                 .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
                 .send()
                 .await?;
             if let Some(msgs) = rmo.messages() {
-                println!("...received from {queue_url}");
+                println!("...received {} message(s) from {}", msgs.len(), component.queue_url);
                 for m in msgs {
                     let empty = HashMap::new();
                     let attrs = m.attributes()
@@ -110,19 +127,20 @@ impl SqsTrigger {
                         message_attributes: &attrs,
                         body: m.body(),
                     };
-                    let action = Self::execute(&engine, &component, message).await?;
+                    let action = Self::execute(&engine, &component.id, message).await?;
                     println!("...action is to {action:?}");
                     if action == sqs::MessageAction::Delete {
                         if let Some(receipt_handle) = m.receipt_handle() {
-                            match client.delete_message().queue_url(&queue_url).receipt_handle(receipt_handle).send().await {
+                            match client.delete_message().queue_url(&component.queue_url).receipt_handle(receipt_handle).send().await {
                                 Ok(_) => (),
                                 Err(e) => eprintln!("TRIG: err deleting {receipt_handle}: {e:?}"),
                             }
                         }
                     }
                 }
+            } else {
+                tokio::time::sleep(component.idle_wait).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
     }
 
