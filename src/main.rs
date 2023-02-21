@@ -33,7 +33,6 @@ pub struct SqsTriggerConfig {
     pub idle_wait_seconds: Option<u64>,
     pub system_attributes: Option<Vec<String>>,
     pub message_attributes: Option<Vec<String>>,
-    // TODO: visibility timeout?
 }
 
 #[derive(Clone, Debug)]
@@ -44,7 +43,6 @@ struct Component {
     pub idle_wait: tokio::time::Duration,
     pub system_attributes: Vec<aws_sdk_sqs::model::QueueAttributeName>,
     pub message_attributes: Vec<String>,
-    // TODO: visibility timeout?
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -111,17 +109,16 @@ impl SqsTrigger {
     async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) -> Result<()> {
         loop {
             println!("Attempting to receive up to {} from {}...", component.max_messages, component.queue_url);
-            // Okay seems like we have to explicitly ask for the attr and message_attr names we want
+
             let rmo = client
                 .receive_message()
-                .max_number_of_messages(component.max_messages)
                 .queue_url(&component.queue_url)
-                // .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
-                // .message_attribute_names("All")
+                .max_number_of_messages(component.max_messages)
                 .set_attribute_names(Some(component.system_attributes.clone()))
                 .set_message_attribute_names(Some(component.message_attributes.clone()))
                 .send()
                 .await?;
+
             if let Some(msgs) = rmo.messages() {
                 println!("...received {} message(s) from {}", msgs.len(), component.queue_url);
                 for m in msgs {
@@ -143,6 +140,9 @@ impl SqsTrigger {
                         message_attributes: &attrs,
                         body: m.body(),
                     };
+                    //
+                    // TODO: !!! HOLD THE LEASE WHILE PROCESSING !!!
+                    //
                     let action = Self::execute(&engine, &component.id, message).await?;
                     println!("...action is to {action:?}");
                     if action == sqs::MessageAction::Delete {
