@@ -67,74 +67,19 @@ impl TriggerExecutor for SqsExecutor {
             std::process::exit(0);
         });
 
+        println!("EXECUTOR: running");
+
         let addr = "[::1]:50051".parse().unwrap();
         tonic::transport::Server::builder()
             .add_service(pb::sqs_message_executor_server::SqsMessageExecutorServer::new(self))
             .serve(addr)
             .await?;
-        // let server = pb::sqs_message_executor_server::SqsMessageExecutorServer::connect("http://[::1]:50051").await?;
-        // let engine = Arc::new(self.engine);
-
-        // let loops = self.queue_components.iter().map(|(queue_url, component)| {
-        //     Self::start_receive_loop(engine.clone(), &client, queue_url, component)
-        // });
-
-        // let (r, _, rest) = futures::future::select_all(loops).await;
-        // drop(rest);
-
-        // r?
 
         Ok(())
     }
 }
 
 impl SqsExecutor {
-    // // TODO: would this work better returning a stream to allow easy multiplexing etc?
-    // fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, queue_url: &str, component: &str) -> tokio::task::JoinHandle<Result<()>> {
-    //     let future = Self::receive(engine, client.clone(), queue_url.to_owned(), component.to_owned());
-    //     tokio::task::spawn(future)
-    // }
-
-    // async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, queue_url: String, component: String) -> Result<()> {
-    //     loop {
-    //         println!("Attempting to receive from {queue_url}...");
-    //         // Okay seems like we have to explicitly ask for the attr and message_attr names we want
-    //         let rmo = client
-    //             .receive_message()
-    //             .queue_url(&queue_url)
-    //             .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
-    //             .send()
-    //             .await?;
-    //         if let Some(msgs) = rmo.messages() {
-    //             println!("...received from {queue_url}");
-    //             for m in msgs {
-    //                 let empty = HashMap::new();
-    //                 let attrs = m.attributes()
-    //                     .unwrap_or(&empty)
-    //                     .iter()
-    //                     .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
-    //                     .collect::<Vec<_>>();
-    //                 let message = sqs::Message {
-    //                     id: m.message_id(),
-    //                     message_attributes: &attrs,
-    //                     body: m.body(),
-    //                 };
-    //                 let action = Self::execute(&engine, &component, message).await?;
-    //                 println!("...action is to {action:?}");
-    //                 if action == sqs::MessageAction::Delete {
-    //                     if let Some(receipt_handle) = m.receipt_handle() {
-    //                         match client.delete_message().queue_url(&queue_url).receipt_handle(receipt_handle).send().await {
-    //                             Ok(_) => (),
-    //                             Err(e) => eprintln!("TRIG: err deleting {receipt_handle}: {e:?}"),
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-    //     }
-    // }
-
     async fn execute_wasm(&self, component_id: &str, message: sqs::Message<'_>) -> Result<sqs::MessageAction> {
         println!("Executing component {component_id}");
         let (instance, mut store) = self.engine.prepare_instance(component_id).await?;
@@ -153,6 +98,7 @@ impl SqsExecutor {
 impl pb::sqs_message_executor_server::SqsMessageExecutor for SqsExecutor {
     async fn execute(&self, req: tonic::Request<pb::SqsMessage>) -> Result<tonic::Response<pb::SqsMessageResponse>, tonic::Status> {
         let message = req.get_ref();
+        println!("EXECUTOR: got GRPC message for {}", message.id);
         let wit_message = sqs::Message {
             id: Some(&message.id),
             message_attributes: &vec![],
@@ -161,6 +107,7 @@ impl pb::sqs_message_executor_server::SqsMessageExecutor for SqsExecutor {
         self.execute_wasm(&message.component, wit_message).await.map_err(|e|
             tonic::Status::unknown(e.to_string())  // TODO: elegant Ivan well done
         )?;
+        println!("EXECUTOR: processed GRPC message for {}", message.id);
         Ok(tonic::Response::new(pb::SqsMessageResponse{}))
     }
 }

@@ -61,7 +61,9 @@ impl TriggerExecutor for SqsEventer {
             tokio::signal::ctrl_c().await.unwrap();
             std::process::exit(0);
         });
-
+        
+        println!("EVENTER: running");
+        
         let config = aws_config::load_from_env().await;
 
         let client = aws_sdk_sqs::Client::new(&config);
@@ -86,7 +88,7 @@ impl SqsEventer {
 
     async fn receive(client: aws_sdk_sqs::Client, queue_url: String, component: String) -> Result<()> {
         loop {
-            println!("Attempting to receive from {queue_url}...");
+            println!("EVENTER: Attempting to receive from {queue_url}...");
             // Okay seems like we have to explicitly ask for the attr and message_attr names we want
             let rmo = client
                 .receive_message()
@@ -95,7 +97,7 @@ impl SqsEventer {
                 .send()
                 .await?;
             if let Some(msgs) = rmo.messages() {
-                println!("...received from {queue_url}");
+                println!("EVENTER: ...received from {queue_url}");
                 for m in msgs {
                     let grpc_message = pb::SqsMessage {
                         queue_url: queue_url.clone(),
@@ -105,35 +107,15 @@ impl SqsEventer {
                         attributes: vec![],  // TODO: <-- this
                         receipt_handle: m.receipt_handle().unwrap_or("HOW DO I MAKE AN OPTION").to_owned(),
                     };
+                    // Now this we would like to reuse - how can we do that when tonic wants it
+                    // to be mutable?
                     let mut client = pb::sqs_message_executor_client::SqsMessageExecutorClient::connect("http://[::1]:50051").await?;
 
                     let request = tonic::Request::new(grpc_message);
                     _ = client.execute(request);  // We don't want to wait on a response - just send and forget
-                    
-                    // let empty = HashMap::new();
-                    // let attrs = m.attributes()
-                    //     .unwrap_or(&empty)
-                    //     .iter()
-                    //     .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
-                    //     .collect::<Vec<_>>();
-                    // let message = sqs::Message {
-                    //     id: m.message_id(),
-                    //     message_attributes: &attrs,
-                    //     body: m.body(),
-                    // };
-                    // let action = Self::execute(&engine, &component, message).await?;
-                    // println!("...action is to {action:?}");
-                    // if action == sqs::MessageAction::Delete {
-                    //     if let Some(receipt_handle) = m.receipt_handle() {
-                    //         match client.delete_message().queue_url(&queue_url).receipt_handle(receipt_handle).send().await {
-                    //             Ok(_) => (),
-                    //             Err(e) => eprintln!("TRIG: err deleting {receipt_handle}: {e:?}"),
-                    //         }
-                    //     }
-                    // }
                 }
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
     }
 }
