@@ -31,6 +31,8 @@ pub struct SqsTriggerConfig {
     pub queue_url: String,
     pub max_messages: Option<u32>,
     pub idle_wait_seconds: Option<u64>,
+    pub system_attributes: Option<Vec<String>>,
+    pub message_attributes: Option<Vec<String>>,
     // TODO: visibility timeout?
 }
 
@@ -40,6 +42,8 @@ struct Component {
     pub queue_url: String,
     pub max_messages: i32,  // Should be usize but AWS
     pub idle_wait: tokio::time::Duration,
+    pub system_attributes: Vec<aws_sdk_sqs::model::QueueAttributeName>,
+    pub message_attributes: Vec<String>,
     // TODO: visibility timeout?
 }
 
@@ -64,6 +68,8 @@ impl TriggerExecutor for SqsTrigger {
                 queue_url: config.queue_url.clone(),
                 max_messages: config.max_messages.unwrap_or(10).try_into().unwrap(),   // TODO: HA HA HA... YES!!!
                 idle_wait: tokio::time::Duration::from_secs(config.idle_wait_seconds.unwrap_or(2)),
+                system_attributes: config.system_attributes.clone().unwrap_or_default().iter().map(|s| s.as_str().into()).collect(),
+                message_attributes: config.message_attributes.clone().unwrap_or_default(),
             })
             .collect();
 
@@ -110,18 +116,28 @@ impl SqsTrigger {
                 .receive_message()
                 .max_number_of_messages(component.max_messages)
                 .queue_url(&component.queue_url)
-                .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
+                // .attribute_names(aws_sdk_sqs::model::QueueAttributeName::All)
+                // .message_attribute_names("All")
+                .set_attribute_names(Some(component.system_attributes.clone()))
+                .set_message_attribute_names(Some(component.message_attributes.clone()))
                 .send()
                 .await?;
             if let Some(msgs) = rmo.messages() {
                 println!("...received {} message(s) from {}", msgs.len(), component.queue_url);
                 for m in msgs {
                     let empty = HashMap::new();
-                    let attrs = m.attributes()
+                    let empty2 = HashMap::new();
+                    let sysattrs = m.attributes()
                         .unwrap_or(&empty)
                         .iter()
                         .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
                         .collect::<Vec<_>>();
+                    let userattrs = m.message_attributes()
+                        .unwrap_or(&empty2)
+                        .iter()
+                        .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: wit_value(v), data_type: None })
+                        .collect::<Vec<_>>();
+                    let attrs = vec![sysattrs, userattrs].concat();
                     let message = sqs::Message {
                         id: m.message_id(),
                         message_attributes: &attrs,
@@ -155,5 +171,15 @@ impl SqsTrigger {
             Ok(Err(_e)) => Ok(sqs::MessageAction::Leave),
             Err(_e) => Ok(sqs::MessageAction::Leave),
         }
+    }
+}
+
+fn wit_value(v: &aws_sdk_sqs::model::MessageAttributeValue) -> sqs::MessageAttributeValue {
+    if let Some(s) = v.string_value() {
+        sqs::MessageAttributeValue::Str(s)
+    } else if let Some(b) = v.binary_value() {
+        sqs::MessageAttributeValue::Binary(b.as_ref())
+    } else {
+        panic!("Don't know what to do with message attribute value {:?}", v);
     }
 }
