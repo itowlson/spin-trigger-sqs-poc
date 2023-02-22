@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use sqs::Sqs;
 use spin_trigger::{cli::{NoArgs, TriggerExecutorCommand}, TriggerAppEngine, TriggerExecutor};
 
+// TODO: dynamically
+const QUEUE_TIMEOUT_SECS: u16 = 30;
+
 wit_bindgen_wasmtime::import!({paths: ["sqs.wit"], async: *});
 
 pub(crate) type RuntimeData = sqs::SqsData;
@@ -168,22 +171,11 @@ impl SqsTrigger {
             message_attributes: &attrs,
             body: m.body(),
         };
-    
-        let client2 = client.clone();
-        let queue_url = component.queue_url.clone();
-        let rh2 = m.receipt_handle().map(|s| s.to_owned());
-        let mid = m.message_id().unwrap_or("[unknown ID]").to_owned();
-        let renew_lease = rh2.map(|rh| tokio::spawn(async move {
-            loop {
-                // TODO: not great if the API call takes a long time
-                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-                println!("!!! RENEW RENEW RENEW !!!");
-                let cmv = client2.change_message_visibility().queue_url(&queue_url).receipt_handle(&rh).visibility_timeout(30).send().await;
-                if let Err(e) = cmv {
-                    eprintln!("Failed to update lease for message id {mid}: {}", e.to_string());
-                }
-            }
-        }));
+
+        // TODO: how do we determine the actual visibility timeout of the message?
+        // We could force it in the receive, but would be good to have option to respect the queue default.
+        // (The queue VT can be got via client.get_queue_attributes.  But consider when and how to track.)
+        let renew_lease = hold_message_lease(&client, &component, &m, QUEUE_TIMEOUT_SECS);
 
         let action = Self::execute(&engine, &component.id, message).await;
         println!("...action is to {action:?}");
@@ -209,6 +201,29 @@ impl SqsTrigger {
         }
    
     }
+}
+
+fn hold_message_lease(client: &aws_sdk_sqs::Client, component: &Component, m: &aws_sdk_sqs::model::Message, timeout_secs: u16) -> Option<tokio::task::JoinHandle<()>> {
+    let client = client.clone();
+    let queue_url = component.queue_url.clone();
+    let rcpt_handle = m.receipt_handle().map(|s| s.to_owned());
+    let msg_id = m.message_id().unwrap_or("[unknown ID]").to_owned();
+    let interval = tokio::time::Duration::from_secs((timeout_secs / 2).into());
+
+    // TODO: is it worth figuring out a way to batch the renewals?  Same with delete
+    // actions I guess
+    let renew_lease = rcpt_handle.map(|rh| tokio::spawn(async move {
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        loop {
+            ticker.tick().await;
+            println!("Renewing lease for message id {msg_id}");
+            let cmv = client.change_message_visibility().queue_url(&queue_url).receipt_handle(&rh).visibility_timeout(timeout_secs.into()).send().await;
+            if let Err(e) = cmv {
+                eprintln!("Failed to update lease for message id {msg_id}: {}", e.to_string());
+            }
+        }
+    }));
+    renew_lease
 }
 
 fn wit_value(v: &aws_sdk_sqs::model::MessageAttributeValue) -> sqs::MessageAttributeValue {
