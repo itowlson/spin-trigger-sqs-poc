@@ -110,6 +110,8 @@ impl SqsTrigger {
     }
 
     async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) -> Result<()> {
+        let queue_timeout_secs = get_queue_timeout_secs(&client, &component.queue_url).await;
+
         loop {
             println!("Attempting to receive up to {} from {}...", component.max_messages, component.queue_url);
 
@@ -130,7 +132,7 @@ impl SqsTrigger {
                     let e = engine.clone();
                     let cl = client.clone();
                     let comp = component.clone();
-                    tokio::spawn(async move { Self::process_message(m, e, cl, comp).await; });
+                    tokio::spawn(async move { Self::process_message(m, e, cl, comp, queue_timeout_secs).await; });
                 }
             } else {
                 tokio::time::sleep(component.idle_wait).await;
@@ -151,7 +153,7 @@ impl SqsTrigger {
         }
     }
 
-    async fn process_message(m: aws_sdk_sqs::model::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) {
+    async fn process_message(m: aws_sdk_sqs::model::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component, queue_timeout_secs: u16) {
         // This has to be inlined or the lists fall off the edge of the borrow checker
         let empty = HashMap::new();
         let empty2 = HashMap::new();
@@ -172,10 +174,7 @@ impl SqsTrigger {
             body: m.body(),
         };
 
-        // TODO: how do we determine the actual visibility timeout of the message?
-        // We could force it in the receive, but would be good to have option to respect the queue default.
-        // (The queue VT can be got via client.get_queue_attributes.  But consider when and how to track.)
-        let renew_lease = hold_message_lease(&client, &component, &m, QUEUE_TIMEOUT_SECS);
+        let renew_lease = hold_message_lease(&client, &component, &m, queue_timeout_secs);
 
         let action = Self::execute(&engine, &component.id, message).await;
         println!("...action is to {action:?}");
@@ -200,6 +199,33 @@ impl SqsTrigger {
             }
         }
    
+    }
+}
+
+async fn get_queue_timeout_secs(client: &aws_sdk_sqs::Client, queue_url: &str) -> u16 {
+    match client.get_queue_attributes().queue_url(queue_url).attribute_names(aws_sdk_sqs::model::QueueAttributeName::VisibilityTimeout).send().await {
+        Err(e) => {
+            eprintln!("Unable to establish queue timeout, using default {QUEUE_TIMEOUT_SECS} secs: {}", e.to_string());
+            QUEUE_TIMEOUT_SECS
+        },
+        Ok(gqa) => {
+            match gqa.attributes() {
+                None => {
+                        eprintln!("No attrs, using default {QUEUE_TIMEOUT_SECS} secs");
+                        QUEUE_TIMEOUT_SECS
+                }
+                Some(attrs) => match attrs.get(&aws_sdk_sqs::model::QueueAttributeName::VisibilityTimeout) {
+                    None => {
+                        eprintln!("No timeout attr found, using default {QUEUE_TIMEOUT_SECS} secs");
+                        QUEUE_TIMEOUT_SECS
+                    },
+                    Some(vt) => {
+                        eprintln!("Parsing queue tiemout {vt}");
+                        vt.parse().unwrap_or(QUEUE_TIMEOUT_SECS)
+                    }
+                }
+            }
+        }
     }
 }
 
