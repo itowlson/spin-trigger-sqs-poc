@@ -120,39 +120,14 @@ impl SqsTrigger {
                 .await?;
 
             if let Some(msgs) = rmo.messages() {
+                let msgs = msgs.to_vec();
                 println!("...received {} message(s) from {}", msgs.len(), component.queue_url);
                 for m in msgs {
-                    let empty = HashMap::new();
-                    let empty2 = HashMap::new();
-                    let sysattrs = m.attributes()
-                        .unwrap_or(&empty)
-                        .iter()
-                        .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
-                        .collect::<Vec<_>>();
-                    let userattrs = m.message_attributes()
-                        .unwrap_or(&empty2)
-                        .iter()
-                        .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: wit_value(v), data_type: None })
-                        .collect::<Vec<_>>();
-                    let attrs = vec![sysattrs, userattrs].concat();
-                    let message = sqs::Message {
-                        id: m.message_id(),
-                        message_attributes: &attrs,
-                        body: m.body(),
-                    };
-                    //
-                    // TODO: !!! HOLD THE LEASE WHILE PROCESSING !!!
-                    //
-                    let action = Self::execute(&engine, &component.id, message).await?;
-                    println!("...action is to {action:?}");
-                    if action == sqs::MessageAction::Delete {
-                        if let Some(receipt_handle) = m.receipt_handle() {
-                            match client.delete_message().queue_url(&component.queue_url).receipt_handle(receipt_handle).send().await {
-                                Ok(_) => (),
-                                Err(e) => eprintln!("TRIG: err deleting {receipt_handle}: {e:?}"),
-                            }
-                        }
-                    }
+                    // Spin off the execution so it doesn't block the queue
+                    let e = engine.clone();
+                    let cl = client.clone();
+                    let comp = component.clone();
+                    tokio::spawn(async move { Self::process_message(m, e, cl, comp).await; });
                 }
             } else {
                 tokio::time::sleep(component.idle_wait).await;
@@ -171,6 +146,68 @@ impl SqsTrigger {
             Ok(Err(_e)) => Ok(sqs::MessageAction::Leave),
             Err(_e) => Ok(sqs::MessageAction::Leave),
         }
+    }
+
+    async fn process_message(m: aws_sdk_sqs::model::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) {
+        // This has to be inlined or the lists fall off the edge of the borrow checker
+        let empty = HashMap::new();
+        let empty2 = HashMap::new();
+        let sysattrs = m.attributes()
+            .unwrap_or(&empty)
+            .iter()
+            .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
+            .collect::<Vec<_>>();
+        let userattrs = m.message_attributes()
+            .unwrap_or(&empty2)
+            .iter()
+            .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: wit_value(v), data_type: None })
+            .collect::<Vec<_>>();
+        let attrs = vec![sysattrs, userattrs].concat();
+        let message = sqs::Message {
+            id: m.message_id(),
+            message_attributes: &attrs,
+            body: m.body(),
+        };
+    
+        let client2 = client.clone();
+        let queue_url = component.queue_url.clone();
+        let rh2 = m.receipt_handle().map(|s| s.to_owned());
+        let mid = m.message_id().unwrap_or("[unknown ID]").to_owned();
+        let renew_lease = rh2.map(|rh| tokio::spawn(async move {
+            loop {
+                // TODO: not great if the API call takes a long time
+                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                println!("!!! RENEW RENEW RENEW !!!");
+                let cmv = client2.change_message_visibility().queue_url(&queue_url).receipt_handle(&rh).visibility_timeout(30).send().await;
+                if let Err(e) = cmv {
+                    eprintln!("Failed to update lease for message id {mid}: {}", e.to_string());
+                }
+            }
+        }));
+
+        let action = Self::execute(&engine, &component.id, message).await;
+        println!("...action is to {action:?}");
+
+        if let Some(renewer) = renew_lease {
+            renewer.abort();
+        }
+
+        match action {
+            Ok(sqs::MessageAction::Delete) => {
+                if let Some(receipt_handle) = m.receipt_handle() {
+                    match client.delete_message().queue_url(&component.queue_url).receipt_handle(receipt_handle).send().await {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("TRIG: err deleting {receipt_handle}: {e:?}"),
+                    }
+                }
+            }
+            Ok(sqs::MessageAction::Leave) => (),  // TODO: change message visibility to 0
+            Err(e) => {
+                eprintln!("Error processing message {:?}: {}", m.message_id(), e.to_string())
+                // TODO: change message visibility to 0 I guess?
+            }
+        }
+   
     }
 }
 
