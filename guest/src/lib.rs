@@ -10,6 +10,13 @@ impl sqs::Sqs for Sqs {
         }
         println!("  ... BODY: {:?}", message.body);
 
+        // Okay time to get rid of Error::Success and to PUT SOME INFO IN THE ERROR
+        if let Some(b) = message.body.as_ref() {
+            if b.contains("ERROR") {
+                return Err(sqs::Error::Error);
+            }
+        }
+
         if let Some(mid) = message.id {
             if let Some(last_char) = mid.chars().last() {
                 if let Some(num) = last_char.to_digit(10) {
