@@ -1,4 +1,4 @@
-use std::{sync::Arc};
+use std::{sync::Arc, collections::HashMap};
 
 use anyhow::{Error, Result};
 use async_trait::async_trait;
@@ -249,28 +249,43 @@ fn to_wit_message_attrs(m: &aws::Message) -> Vec<sqs::MessageAttribute> {
     let msg_id = m.display_id();
 
     let sysattrs = m.attributes()
-        .map(|a|
-            a
-            .iter()
-            .map(|(k, v)| sqs::MessageAttribute { name: k.as_str(), value: sqs::MessageAttributeValue::Str(v.as_str()), data_type: None })
-            .collect::<Vec<_>>()
-        ).unwrap_or_default();
+        .map(system_attributes_to_wit)
+        .unwrap_or_default();
     let userattrs = m.message_attributes()
-        .map(|a|
-            a
-            .iter()
-            .filter_map(|(k, v)| {
-                match wit_value(v) {
-                    Ok(wv) => Some(sqs::MessageAttribute { name: k.as_str(), value: wv, data_type: None }),
-                    Err(e) => {
-                        tracing::error!("Message {msg_id}: can't convert attribute {} to string or blob, skipped: {e:?}", k.as_str());  // TODO: this should probably fail the message
-                        None
-                    },
-                }
-            })
-            .collect::<Vec<_>>()
-        ).unwrap_or_default();
+        .map(|a| user_attributes_to_wit(a, &msg_id))
+        .unwrap_or_default();
+
     vec![sysattrs, userattrs].concat()
+}
+
+fn system_attributes_to_wit(src: &HashMap<aws::MessageSystemAttributeName, String>) -> Vec<sqs::MessageAttribute> {
+    src
+    .iter()
+    .map(|(k, v)| sqs::MessageAttribute {
+        name: k.as_str(),
+        value: sqs::MessageAttributeValue::Str(v.as_str()),
+        data_type: None
+    })
+    .collect::<Vec<_>>()
+}
+
+fn user_attributes_to_wit<'a>(src: &'a HashMap<String, aws::MessageAttributeValue>, msg_id: &str) -> Vec<sqs::MessageAttribute<'a>> {
+    src
+    .iter()
+    .filter_map(|(k, v)| {
+        match wit_value(v) {
+            Ok(wv) => Some(sqs::MessageAttribute {
+                name: k.as_str(),
+                value: wv,
+                data_type: None
+            }),
+            Err(e) => {
+                tracing::error!("Message {msg_id}: can't convert attribute {} to string or blob, skipped: {e:?}", k.as_str());  // TODO: this should probably fail the message
+                None
+            },
+        }
+    })
+    .collect::<Vec<_>>()
 }
 
 fn wit_value(v: &aws::MessageAttributeValue) -> Result<sqs::MessageAttributeValue> {

@@ -1,6 +1,7 @@
 pub use aws_sdk_sqs::Client;
 pub use aws_sdk_sqs::model::Message;
 pub use aws_sdk_sqs::model::MessageAttributeValue;
+pub use aws_sdk_sqs::model::MessageSystemAttributeName;
 pub use aws_sdk_sqs::model::QueueAttributeName;
 
 use crate::utils::MessageUtils;
