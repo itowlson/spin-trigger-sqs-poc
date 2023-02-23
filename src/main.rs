@@ -61,6 +61,18 @@ struct TriggerMetadata {
     r#type: String,
 }
 
+// This is a placeholder - we don't yet detect any situations that would require
+// graceful or ungraceful exit.  It will likely require rework when we do.  It
+// is here so that we have a skeleton for returning errors that doesn't expose
+// us to thoughtlessly "?"-ing away an Err case and creating a situation where a
+// transient failure could end the trigger.
+#[allow(dead_code)]
+#[derive(Debug)]
+enum TerminationReason {
+    ExitRequested,
+    Other(String),
+}
+
 #[async_trait]
 impl TriggerExecutor for SqsTrigger {
     const TRIGGER_TYPE: &'static str = "sqs";
@@ -102,33 +114,53 @@ impl TriggerExecutor for SqsTrigger {
             Self::start_receive_loop(engine.clone(), &client, component)
         });
 
-        let (r, _, rest) = futures::future::select_all(loops).await;
+        let (tr, _, rest) = futures::future::select_all(loops).await;
         drop(rest);
 
-        r?
+        match tr {
+            Ok(TerminationReason::ExitRequested) => {
+                tracing::trace!("Exiting");
+                Ok(())
+            },
+            _ => {
+                tracing::trace!("Fatal: {:?}", tr);
+                Err(anyhow::anyhow!("{tr:?}"))
+            }
+        }
     }
 }
 
 impl SqsTrigger {
-    fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, component: &Component) -> tokio::task::JoinHandle<Result<()>> {
+    fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, component: &Component) -> tokio::task::JoinHandle<TerminationReason> {
         let future = Self::receive(engine, client.clone(), component.clone());
         tokio::task::spawn(future)
     }
 
-    async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) -> Result<()> {
+    // This doesn't return a Result because we don't want a thoughtless `?` to exit the loop
+    // and terminate the entire trigger.  Termination should be a conscious decision when
+    // we are sure there is no point continuing.
+    async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) -> TerminationReason {
         let queue_timeout_secs = get_queue_timeout_secs(&client, &component.queue_url).await;
 
         loop {
             tracing::trace!("Queue {}: attempting to receive up to {}", component.queue_url, component.max_messages);
 
-            let rmo = client
+            let rmo = match client
                 .receive_message()
                 .queue_url(&component.queue_url)
                 .max_number_of_messages(component.max_messages)
                 .set_attribute_names(Some(component.system_attributes.clone()))
                 .set_message_attribute_names(Some(component.message_attributes.clone()))
                 .send()
-                .await?;
+                .await
+            {
+                Ok(rmo) => rmo,
+                Err(e) => {
+                    tracing::error!("Queue {}: error receiving messages: {:?}", component.queue_url, e);
+                    tokio::time::sleep(component.idle_wait).await;
+                    continue;
+                }
+            };
 
             if let Some(msgs) = rmo.messages() {
                 let msgs = msgs.to_vec();
