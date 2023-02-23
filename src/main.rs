@@ -41,7 +41,7 @@ pub struct SqsTrigger {
 pub struct SqsTriggerConfig {
     pub component: String,
     pub queue_url: String,
-    pub max_messages: Option<u32>,
+    pub max_messages: Option<u16>,
     pub idle_wait_seconds: Option<u64>,
     pub system_attributes: Option<Vec<String>>,
     pub message_attributes: Option<Vec<String>>,
@@ -51,7 +51,7 @@ pub struct SqsTriggerConfig {
 struct Component {
     pub id: String,
     pub queue_url: String,
-    pub max_messages: i32,  // Should be usize but AWS
+    pub max_messages: u16,
     pub idle_wait: tokio::time::Duration,
     pub system_attributes: Vec<aws::QueueAttributeName>,
     pub message_attributes: Vec<String>,
@@ -88,7 +88,7 @@ impl TriggerExecutor for SqsTrigger {
             .map(|(_, config)| Component {
                 id: config.component.clone(),
                 queue_url: config.queue_url.clone(),
-                max_messages: config.max_messages.unwrap_or(10).try_into().unwrap(),   // TODO: HA HA HA... YES!!!
+                max_messages: config.max_messages.unwrap_or(10).into(),
                 idle_wait: tokio::time::Duration::from_secs(config.idle_wait_seconds.unwrap_or(2)),
                 system_attributes: config.system_attributes.clone().unwrap_or_default().iter().map(|s| s.as_str().into()).collect(),
                 message_attributes: config.message_attributes.clone().unwrap_or_default(),
@@ -150,7 +150,7 @@ impl SqsTrigger {
             let rmo = match client
                 .receive_message()
                 .queue_url(&component.queue_url)
-                .max_number_of_messages(component.max_messages)
+                .max_number_of_messages(component.max_messages.into())
                 .set_attribute_names(Some(component.system_attributes.clone()))
                 .set_message_attribute_names(Some(component.message_attributes.clone()))
                 .send()
@@ -167,12 +167,12 @@ impl SqsTrigger {
             if let Some(msgs) = rmo.messages() {
                 let msgs = msgs.to_vec();
                 tracing::info!("Queue {}: received {} message(s)", component.queue_url, msgs.len());
-                for m in msgs {
+                for msg in msgs {
                     // Spin off the execution so it doesn't block the queue
-                    let e = engine.clone();
-                    let cl = client.clone();
-                    let comp = component.clone();
-                    tokio::spawn(async move { Self::process_message(m, e, cl, comp, queue_timeout_secs).await; });
+                    let processor = SqsMessageProcessor::new(&engine, &client, &component, queue_timeout_secs);
+                    tokio::spawn(async move {
+                        processor.process_message(msg).await
+                    });
                 }
             } else {
                 tracing::trace!("Queue {}: no messages received", component.queue_url);
@@ -180,11 +180,77 @@ impl SqsTrigger {
             }
         }
     }
+}
 
-    async fn execute(engine: &Arc<TriggerAppEngine<Self>>, component_id: &str, message: sqs::Message<'_>) -> Result<sqs::MessageAction> {
+struct SqsMessageProcessor {
+    engine: Arc<TriggerAppEngine<SqsTrigger>>,
+    client: aws::Client,
+    component: Component,
+    queue_timeout_secs: u16,
+}
+
+impl SqsMessageProcessor {
+    fn new(
+        engine: &Arc<TriggerAppEngine<SqsTrigger>>,
+        client: &aws::Client,
+        component: &Component,
+        queue_timeout_secs: u16
+    ) -> Self {
+        Self {
+            engine: engine.clone(),
+            client: client.clone(),
+            component: component.clone(),
+            queue_timeout_secs
+        }
+    }
+
+    async fn process_message(&self, msg: aws::Message) {
+        let msg_id = msg.display_id();
+        tracing::trace!("Message {msg_id}: spawned processing task");
+
+        // The attr lists have to be returned to this level so that they live long enough
+        let attrs = to_wit_message_attrs(&msg);
+        let message = sqs::Message {
+            id: msg.message_id(),
+            message_attributes: &attrs,
+            body: msg.body(),
+        };
+
+        let renew_lease = aws::hold_message_lease(&self.client, self.queue_url(), &msg, self.queue_timeout_secs);
+
+        let action = self.execute_wasm(message).await;
+
+        if let Some(renewer) = renew_lease {
+            renewer.abort();
+        }
+
+        match action {
+            Ok(sqs::MessageAction::Delete) => {
+                tracing::trace!("Message {msg_id} processed successfully: action is Delete");
+                if let Some(receipt_handle) = msg.receipt_handle() {
+                    tracing::trace!("Message {msg_id}: attempting to delete via {receipt_handle}");
+                    match self.client.delete_message().queue_url(self.queue_url()).receipt_handle(receipt_handle).send().await {
+                        Ok(_) => tracing::trace!("Message {msg_id} deleted"),
+                        Err(e) => tracing::error!("Message {msg_id}: error deleting via {receipt_handle}: {e:?}"),
+                    }
+                }
+            }
+            Ok(sqs::MessageAction::Leave) => {
+                tracing::trace!("Message {msg_id} processed successfully: action is Leave");
+                // TODO: change message visibility to 0?
+            }
+            Err(e) => {
+                tracing::error!("Message {msg_id} processing error: {}", e.to_string());
+                // TODO: change message visibility to 0 I guess?
+            }
+        }
+    }
+
+    async fn execute_wasm(&self, message: sqs::Message<'_>) -> Result<sqs::MessageAction> {
         let msg_id = message.display_id();
+        let component_id = &self.component.id;
         tracing::trace!("Message {msg_id}: executing component {component_id}");
-        let (instance, mut store) = engine.prepare_instance(component_id).await?;
+        let (instance, mut store) = self.engine.prepare_instance(component_id).await?;
         let sqs_engine = Sqs::new(&mut store, &instance, |data| data.as_mut())?;
         match sqs_engine.handle_queue_message(&mut store, message).await {
             Ok(Ok(action)) => {
@@ -202,46 +268,8 @@ impl SqsTrigger {
         }
     }
 
-    async fn process_message(m: aws::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws::Client, component: Component, queue_timeout_secs: u16) {
-        let msg_id = m.display_id();
-        tracing::trace!("Message {msg_id}: spawned processing task");
-
-        // The attr lists have to be returned to this level so that they live long enough
-        let attrs = to_wit_message_attrs(&m);
-        let message = sqs::Message {
-            id: m.message_id(),
-            message_attributes: &attrs,
-            body: m.body(),
-        };
-
-        let renew_lease = aws::hold_message_lease(&client, &component.queue_url, &m, queue_timeout_secs);
-
-        let action = Self::execute(&engine, &component.id, message).await;
-
-        if let Some(renewer) = renew_lease {
-            renewer.abort();
-        }
-
-        match action {
-            Ok(sqs::MessageAction::Delete) => {
-                tracing::trace!("Message {msg_id} processed successfully: action is Delete");
-                if let Some(receipt_handle) = m.receipt_handle() {
-                    tracing::trace!("Message {msg_id}: attempting to delete via {receipt_handle}");
-                    match client.delete_message().queue_url(&component.queue_url).receipt_handle(receipt_handle).send().await {
-                        Ok(_) => tracing::trace!("Message {msg_id} deleted"),
-                        Err(e) => tracing::error!("Message {msg_id}: error deleting via {receipt_handle}: {e:?}"),
-                    }
-                }
-            }
-            Ok(sqs::MessageAction::Leave) => {
-                tracing::trace!("Message {msg_id} processed successfully: action is Leave");
-                // TODO: change message visibility to 0?
-            }
-            Err(e) => {
-                tracing::error!("Message {msg_id} processing error: {}", e.to_string());
-                // TODO: change message visibility to 0 I guess?
-            }
-        }
+    fn queue_url(&self) -> &str {
+        &self.component.queue_url
     }
 }
 
