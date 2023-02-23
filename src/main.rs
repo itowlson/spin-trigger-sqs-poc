@@ -180,7 +180,7 @@ impl SqsTrigger {
     }
 
     async fn execute(engine: &Arc<TriggerAppEngine<Self>>, component_id: &str, message: sqs::Message<'_>) -> Result<sqs::MessageAction> {
-        let msg_id = message.id.unwrap_or(UNKNOWN_ID).to_owned();
+        let msg_id = message.display_id();
         tracing::trace!("Message {msg_id}: executing component {component_id}");
         let (instance, mut store) = engine.prepare_instance(component_id).await?;
         let sqs_engine = Sqs::new(&mut store, &instance, |data| data.as_mut())?;
@@ -201,7 +201,7 @@ impl SqsTrigger {
     }
 
     async fn process_message(m: aws_sdk_sqs::model::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component, queue_timeout_secs: u16) {
-        let msg_id = m.message_id().unwrap_or(UNKNOWN_ID).to_owned();
+        let msg_id = m.display_id();
         tracing::trace!("Message {msg_id}: spawned processing task");
 
         // The attr lists have to be returned to this level so that they live long enough
@@ -244,7 +244,7 @@ impl SqsTrigger {
 }
 
 fn to_wit_message_attrs(m: &aws_sdk_sqs::model::Message) -> Vec<sqs::MessageAttribute> {
-    let msg_id = m.message_id().unwrap_or(UNKNOWN_ID).to_owned();
+    let msg_id = m.display_id();
 
     let sysattrs = m.attributes()
         .map(|a|
@@ -302,7 +302,7 @@ fn hold_message_lease(client: &aws_sdk_sqs::Client, component: &Component, m: &a
     let client = client.clone();
     let queue_url = component.queue_url.clone();
     let rcpt_handle = m.receipt_handle().map(|s| s.to_owned());
-    let msg_id = m.message_id().unwrap_or("[unknown ID]").to_owned();
+    let msg_id = m.display_id();
     let interval = tokio::time::Duration::from_secs((timeout_secs / 2).into());
 
     // TODO: is it worth figuring out a way to batch the renewals?  Same with delete
@@ -327,5 +327,21 @@ fn wit_value(v: &aws_sdk_sqs::model::MessageAttributeValue) -> Result<sqs::Messa
         Ok(sqs::MessageAttributeValue::Binary(b.as_ref()))
     } else {
         Err(anyhow::anyhow!("Don't know what to do with message attribute value {:?} (data type {:?})", v, v.data_type()))
+    }
+}
+
+trait MessageUtils {
+    fn display_id(&self) -> String;
+}
+
+impl MessageUtils for aws_sdk_sqs::model::Message {
+    fn display_id(&self) -> String {
+        self.message_id().unwrap_or(UNKNOWN_ID).to_owned()
+    }
+}
+
+impl MessageUtils for sqs::Message<'_> {
+    fn display_id(&self) -> String {
+        self.id.unwrap_or(UNKNOWN_ID).to_owned()
     }
 }
