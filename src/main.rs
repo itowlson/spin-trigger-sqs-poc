@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use sqs::Sqs;
 use spin_trigger::{cli::{NoArgs, TriggerExecutorCommand}, TriggerAppEngine, TriggerExecutor};
 
-const QUEUE_TIMEOUT_SECS: u16 = 30;
-const UNKNOWN_ID: &str = "[unknown id]";
+mod aws;
+mod utils;
+
+use utils::MessageUtils;
 
 wit_bindgen_wasmtime::import!({paths: ["sqs.wit"], async: *});
 
@@ -51,7 +53,7 @@ struct Component {
     pub queue_url: String,
     pub max_messages: i32,  // Should be usize but AWS
     pub idle_wait: tokio::time::Duration,
-    pub system_attributes: Vec<aws_sdk_sqs::model::QueueAttributeName>,
+    pub system_attributes: Vec<aws::QueueAttributeName>,
     pub message_attributes: Vec<String>,
 }
 
@@ -107,7 +109,7 @@ impl TriggerExecutor for SqsTrigger {
 
         let config = aws_config::load_from_env().await;
 
-        let client = aws_sdk_sqs::Client::new(&config);
+        let client = aws::Client::new(&config);
         let engine = Arc::new(self.engine);
 
         let loops = self.queue_components.iter().map(|component| {
@@ -131,7 +133,7 @@ impl TriggerExecutor for SqsTrigger {
 }
 
 impl SqsTrigger {
-    fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws_sdk_sqs::Client, component: &Component) -> tokio::task::JoinHandle<TerminationReason> {
+    fn start_receive_loop(engine: Arc<TriggerAppEngine<Self>>, client: &aws::Client, component: &Component) -> tokio::task::JoinHandle<TerminationReason> {
         let future = Self::receive(engine, client.clone(), component.clone());
         tokio::task::spawn(future)
     }
@@ -139,8 +141,8 @@ impl SqsTrigger {
     // This doesn't return a Result because we don't want a thoughtless `?` to exit the loop
     // and terminate the entire trigger.  Termination should be a conscious decision when
     // we are sure there is no point continuing.
-    async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component) -> TerminationReason {
-        let queue_timeout_secs = get_queue_timeout_secs(&client, &component.queue_url).await;
+    async fn receive(engine: Arc<TriggerAppEngine<Self>>, client: aws::Client, component: Component) -> TerminationReason {
+        let queue_timeout_secs = aws::get_queue_timeout_secs(&client, &component.queue_url).await;
 
         loop {
             tracing::trace!("Queue {}: attempting to receive up to {}", component.queue_url, component.max_messages);
@@ -200,7 +202,7 @@ impl SqsTrigger {
         }
     }
 
-    async fn process_message(m: aws_sdk_sqs::model::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws_sdk_sqs::Client, component: Component, queue_timeout_secs: u16) {
+    async fn process_message(m: aws::Message, engine: Arc<TriggerAppEngine<Self>>, client: aws::Client, component: Component, queue_timeout_secs: u16) {
         let msg_id = m.display_id();
         tracing::trace!("Message {msg_id}: spawned processing task");
 
@@ -212,7 +214,7 @@ impl SqsTrigger {
             body: m.body(),
         };
 
-        let renew_lease = hold_message_lease(&client, &component, &m, queue_timeout_secs);
+        let renew_lease = aws::hold_message_lease(&client, &component.queue_url, &m, queue_timeout_secs);
 
         let action = Self::execute(&engine, &component.id, message).await;
 
@@ -243,7 +245,7 @@ impl SqsTrigger {
     }
 }
 
-fn to_wit_message_attrs(m: &aws_sdk_sqs::model::Message) -> Vec<sqs::MessageAttribute> {
+fn to_wit_message_attrs(m: &aws::Message) -> Vec<sqs::MessageAttribute> {
     let msg_id = m.display_id();
 
     let sysattrs = m.attributes()
@@ -271,77 +273,12 @@ fn to_wit_message_attrs(m: &aws_sdk_sqs::model::Message) -> Vec<sqs::MessageAttr
     vec![sysattrs, userattrs].concat()
 }
 
-async fn get_queue_timeout_secs(client: &aws_sdk_sqs::Client, queue_url: &str) -> u16 {
-    match client.get_queue_attributes().queue_url(queue_url).attribute_names(aws_sdk_sqs::model::QueueAttributeName::VisibilityTimeout).send().await {
-        Err(e) => {
-            tracing::warn!("Queue {queue_url}: unable to establish queue timeout, using default {QUEUE_TIMEOUT_SECS} secs: {}", e.to_string());
-            QUEUE_TIMEOUT_SECS
-        },
-        Ok(gqa) => {
-            match gqa.attributes() {
-                None => {
-                        tracing::debug!("Queue {queue_url}: no attrs, using default {QUEUE_TIMEOUT_SECS} secs");
-                        QUEUE_TIMEOUT_SECS
-                }
-                Some(attrs) => match attrs.get(&aws_sdk_sqs::model::QueueAttributeName::VisibilityTimeout) {
-                    None => {
-                        tracing::debug!("Queue {queue_url}: no timeout attr found, using default {QUEUE_TIMEOUT_SECS} secs");
-                        QUEUE_TIMEOUT_SECS
-                    },
-                    Some(vt) => {
-                        tracing::debug!("Queue {queue_url}: parsing queue tiemout {vt}");
-                        vt.parse().unwrap_or(QUEUE_TIMEOUT_SECS)
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn hold_message_lease(client: &aws_sdk_sqs::Client, component: &Component, m: &aws_sdk_sqs::model::Message, timeout_secs: u16) -> Option<tokio::task::JoinHandle<()>> {
-    let client = client.clone();
-    let queue_url = component.queue_url.clone();
-    let rcpt_handle = m.receipt_handle().map(|s| s.to_owned());
-    let msg_id = m.display_id();
-    let interval = tokio::time::Duration::from_secs((timeout_secs / 2).into());
-
-    // TODO: is it worth figuring out a way to batch the renewals?  Same with delete
-    // actions I guess
-    rcpt_handle.map(|rh| tokio::spawn(async move {
-        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
-        loop {
-            ticker.tick().await;
-            tracing::info!("Message {msg_id}: renewing lease via {rh}");
-            let cmv = client.change_message_visibility().queue_url(&queue_url).receipt_handle(&rh).visibility_timeout(timeout_secs.into()).send().await;
-            if let Err(e) = cmv {
-                tracing::error!("Message {msg_id}: failed to update lease: {}", e.to_string());
-            }
-        }
-    }))
-}
-
-fn wit_value(v: &aws_sdk_sqs::model::MessageAttributeValue) -> Result<sqs::MessageAttributeValue> {
+fn wit_value(v: &aws::MessageAttributeValue) -> Result<sqs::MessageAttributeValue> {
     if let Some(s) = v.string_value() {
         Ok(sqs::MessageAttributeValue::Str(s))
     } else if let Some(b) = v.binary_value() {
         Ok(sqs::MessageAttributeValue::Binary(b.as_ref()))
     } else {
         Err(anyhow::anyhow!("Don't know what to do with message attribute value {:?} (data type {:?})", v, v.data_type()))
-    }
-}
-
-trait MessageUtils {
-    fn display_id(&self) -> String;
-}
-
-impl MessageUtils for aws_sdk_sqs::model::Message {
-    fn display_id(&self) -> String {
-        self.message_id().unwrap_or(UNKNOWN_ID).to_owned()
-    }
-}
-
-impl MessageUtils for sqs::Message<'_> {
-    fn display_id(&self) -> String {
-        self.id.unwrap_or(UNKNOWN_ID).to_owned()
     }
 }
