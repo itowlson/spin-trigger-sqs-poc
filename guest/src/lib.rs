@@ -10,10 +10,9 @@ impl sqs::Sqs for Sqs {
         }
         println!("  ... BODY: {:?}", message.body);
 
-        // Okay time to get rid of Error::Success and to PUT SOME INFO IN THE ERROR
         if let Some(b) = message.body.as_ref() {
             if b.contains("ERROR") {
-                return Err(sqs::Error::Error);
+                return Err(sqs::Error::Other("YOU triggered this error Towlson YOU did this".to_owned()));
             }
         }
 
