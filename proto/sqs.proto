@@ -3,7 +3,7 @@ package sqs;
 
 message SqsMessage {
   string queue_url = 1;
-  string component = 2;
+  // string component = 2;
   string id = 3;
   string body = 4;
 
@@ -19,14 +19,25 @@ message SqsMessage {
 }
 
 message SqsMessageResponse {
-//    enum Action {
-//        DELETE = 0;
-//        LEAVE = 1;
-//    }
-//
-//    Action action = 1;
+//  enum Action {
+//    DELETE = 0;
+//    LEAVE = 1;
+//  }
+//  Action action = 1;
+}
+
+message SqsMessageResponse2 {
+  enum Action {
+    DELETE = 0;
+    LEAVE = 1;
+  }
+
+  string queue_url = 1;
+  string receipt_handle = 2;
+  Action action = 3;
 }
 
 service SqsMessageExecutor {
-    rpc execute(SqsMessage) returns (SqsMessageResponse) {}
+    rpc Execute(SqsMessage) returns (SqsMessageResponse) {}
+    rpc StreamingExecute(stream SqsMessage) returns (stream SqsMessageResponse2) {}
 }

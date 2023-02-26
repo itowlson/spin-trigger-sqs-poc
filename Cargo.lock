@@ -4362,9 +4362,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-stream"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d660770404473ccd7bc9f8b28494a811bc18542b915c0855c51e8f419d5223ce"
+checksum = "8fb52b74f05dbf495a8fba459fdc331812b96aa086d9eb78101fa0d4569c3313"
 dependencies = [
  "futures-core",
  "pin-project-lite",
@@ -4567,17 +4567,20 @@ name = "trigger-sqs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "aws-config",
  "aws-sdk-sqs",
  "clap",
  "futures",
+ "h2",
  "prost",
  "serde",
  "spin-core",
  "spin-trigger",
  "tokio",
  "tokio-scoped",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "wit-bindgen-wasmtime 0.2.0 (git+https://github.com/fermyon/wit-bindgen-backport?rev=b97517c7bfcc82f3cd6e730270d40cd4781aa789)",
