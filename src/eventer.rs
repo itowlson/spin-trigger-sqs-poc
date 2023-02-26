@@ -113,34 +113,12 @@ impl SqsEventer {
                             attributes: vec![],  // TODO: <-- this
                             receipt_handle: m.receipt_handle().unwrap_or("HOW DO I MAKE AN OPTION").to_owned(),
                         };
+                        println!("EVENTER: yielding event to stream {:?}", grpc_message.id);
                         yield grpc_message;
-    
-                        // let request = tonic::Request::new(grpc_message);
-    
-                        // So it turns out we can't fire and forget in this model - the client gets dropped
-                        // and it seems like that aborts the send or causes the receiver to abandon or something.
-                        // Awaiting the response seems tedious but I guess it is async rather than blocking
-                        // so maybe it's benign?  Or maybe if we use a shared long-lived client somehow
-                        // then it will all Just Work.  WHO KNOWS.
-                        //
-                        // Again maybe if our client is long lived then it will Just Work.
-                        //
-                        // Huh, the tonic people tell us to clone it, which doesn't seem like it will keep
-                        // things around.  Oh but maybe it will result in the channel being long-lived?
-                        //
-                        // It did not work.
-                        //
-                        // WAIT WHAT IF WE USED STREAMING
-
-    
-                        // let mut executor_client_2 = executor_client.clone();
-                        // _ = executor_client_2.execute(request);  // We don't want to wait on a response - just send and forget
-
-                        // let r = client.execute(request).await;  // for diagnostics
-                        // println!("EVENTER: sent event, response was {:?}", r);
                     }
+                } else {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }
     
         };
@@ -150,13 +128,13 @@ impl SqsEventer {
                 let mut resp_stm = resp.into_inner();
                 loop {
                     match resp_stm.message().await {
-                        Ok(Some(r)) => println!("got a response from streaming server, {r:?}"),
+                        Ok(Some(r)) => println!("EVENTER: got a response: {r:?}"),
                         Ok(None) => {
-                            println!("TERM TERM TERM");
+                            println!("EVENTER: server is all outta connections. Hasta la vista");
                             break;
                         },
                         Err(e) => {
-                            println!("server sent an error {e:?}");
+                            println!("EVENTER: server sent an error {e:?}");
                         }
                     }
                 }
